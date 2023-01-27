@@ -201,6 +201,8 @@ def test_cls(model, val_data_loader):
 
     with torch.no_grad():
         model.eval()
+        input_points = []
+        fps_points = []
         labels = []
         preds = []
         confs = []
@@ -211,33 +213,50 @@ def test_cls(model, val_data_loader):
                 pbar.update(1)
             points = batch_data[0].cuda()
 
+            input_points = points
+
             points = fps(points, args.npoints)
 
+            fps_points = points
+
             outputs = []
+            confidences2 = []
+            predictions = []
             # vote
             for rotation_matrix in rotation_matrixs:
                 input_pc = rotate_point_clouds(points, rotation_matrix, use_normals=args.use_normals)
                 output = model(input_pc, original_pc = points)
+                confidence2 = np.max(torch.softmax(output, dim=-1).detach().cpu().numpy(), axis=1)
+                prediction = torch.argmax(output, 1).detach().cpu().numpy()
                 outputs.append(output.detach().unsqueeze(0))
+                confidences2.append(confidence2)
+                predictions.append(prediction)
             
             outputs = torch.cat(outputs, dim=0).mean(0)
             confidences = torch.softmax(outputs, dim=-1)
             confidence = np.max(confidences.detach().cpu().numpy(), axis=1)
+            confidences2 = np.concatenate(confidences2).reshape(40,args.test_batch_size).swapaxes(0,1)
+            predictions = np.concatenate(predictions).reshape(40,args.test_batch_size).swapaxes(0,1)
             preds.append(torch.argmax(outputs, 1).detach().cpu().numpy())
             labels.append(batch_data[1].numpy())
             confs.append(np.expand_dims(confidence, axis=1))
             torch.cuda.empty_cache()
+            break
 
         if main_process():
             pbar.close()
         labels = np.concatenate(labels).flatten()
         preds = np.concatenate(preds)
         confs = np.concatenate(confs).flatten()
-        conf_mtx = confusion_matrix(labels,preds,normalize='true')
+        #conf_mtx = confusion_matrix(labels,preds,normalize='true')
         np.save(join(args.save_folder, 'gt.npy'), labels)
         np.save(join(args.save_folder, 'pred.npy'), preds)
         np.save(join(args.save_folder, 'conf.npy'), confs)
-        np.save(join(args.save_folder, 'conf_mtx.npy'), conf_mtx)
+        np.save(join(args.save_folder, 'all_conf.npy'), confidences2)
+        np.save(join(args.save_folder, 'all_pred.npy'), predictions)
+       # np.save(join(args.save_folder, 'conf_mtx.npy'), conf_mtx)
+        np.save(join(args.save_folder, 'input_points.npy'), input_points.detach().cpu().numpy())
+        np.save(join(args.save_folder, 'fps_points.npy'), fps_points.detach().cpu().numpy())
         oAcc = metrics.accuracy_score(labels, preds) * 100
         mAcc = metrics.balanced_accuracy_score(labels, preds) * 100
         

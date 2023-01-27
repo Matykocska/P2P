@@ -1,0 +1,8 @@
+Traceback (most recent call last):
+  File "/home/jupyter/Instruments/P2P/Exp/ModelNet40/p2p_ConvNeXt-B-1k/test.py", line 21, in <module>
+    from models.p2p import P2P
+  File "/home/jupyter/Instruments/P2P/models/__init__.py", line 1, in <module>
+    from models.layers import HorNet
+  File "/home/jupyter/Instruments/P2P/models/layers/HorNet.py", line 13, in <module>
+    from timm.models.layers import trunc_normal_, DropPath
+ModuleNotFoundError: No module named 'timm'

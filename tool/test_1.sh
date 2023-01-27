@@ -18,18 +18,16 @@ export KMP_INIT_AT_FORK=FALSE
 
 PYTHON=python
 TRAIN_CODE=train.py
-TEST_CODE=test.py
+TEST_CODE=test_1.py
 
 
 exp_dir=Exp/${dataset}/${exp_name}
 model_dir=${exp_dir}/model
-result_dir=${exp_dir}/result
+result_dir=${exp_dir}/result_1
 
 now=$(date +"%Y%m%d_%H%M%S")
 
 cp tool/test.sh tool/${TEST_CODE} ${exp_dir}
-mkdir -p ${result_dir}/last
-mkdir -p ${result_dir}/best
 
 export PYTHONPATH=.
 
@@ -38,9 +36,9 @@ now=$(date +"%Y%m%d_%H%M%S")
 
 $PYTHON -u ${exp_dir}/${TEST_CODE} \
   --config=${config} \
-  save_folder ${result_dir}/best \
+  save_folder ${result_dir} \
   model_path ${model_dir}/model_best.pth \
-  2>&1 | tee -a ${exp_dir}/test_best-$now.log
+  2>&1 | tee -a ${exp_dir}/test_1_best-$now.log
 
 # $PYTHON -u ${exp_dir}/${TEST_CODE} \
 #   --config=${config} \

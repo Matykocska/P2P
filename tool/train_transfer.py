@@ -28,6 +28,8 @@ from util.rotate import rotate_point_clouds, rotate_point_clouds_batch, rotate_t
 from dataset import data_transforms
 from models.layers.utils import fps
 from models.p2p import P2P
+from typing import OrderedDict
+import torch.nn as nn
 
 
 train_transforms = transforms.Compose(
@@ -40,6 +42,17 @@ cv2.ocl.setUseOpenCL(False)
 cv2.setNumThreads(0)
 
 best_acc_cls = 0.0
+
+comu_Iter_acc = []
+comu_Iter_loss = []
+        
+comu_epoch_acc = []
+comu_epoch_loss = []
+
+avgAcc_validate = []
+avgLoss_validate = []
+
+
 
 
 def worker_init_fn(worker_id):
@@ -78,8 +91,12 @@ def main_process():
 def main():
     args = get_parser()
     os.environ["CUDA_VISIBLE_DEVICES"] = ','.join(str(x) for x in args.train_gpu)
-    #os.environ["CUDA_LAUNCH_BLOCKING"] = '1'
-    cudnn.benchmark = False
+    
+    os.environ["OPENBLAS_NUM_THREADS"] = '2'
+    os.environ["GOTO_NUM_THREADS"] = '2'
+    os.environ["OMP_NUM_THREADS"] = '2'
+    os.environ["KMP_INIT_AT_FORK"] = 'FALSE'
+   #cudnn.benchmark = True
 
     if args.manual_seed is not None:
         random.seed(args.manual_seed)
@@ -132,8 +149,26 @@ def main_worker(gpu, ngpus_per_node, argss):
         logger.info("=> creating model ...")
         logger.info("Classes: {}".format(args.classes))
         logger.info(model)
+        
+    if args.transfer_model_path and os.path.isfile(args.transfer_model_path):
+        if main_process():
+            logger.info("=> loading checkpoint '{}'".format(args.model_path))
+        checkpoint = torch.load(args.transfer_model_path, map_location=lambda storage, loc: storage.cuda())
+        
+        state_dict = OrderedDict({key.replace("module.", ""): value for key, value in checkpoint['state_dict'].items()})
+    
+        model.load_state_dict(state_dict, strict=True)
 
-    model._fix_weight()
+        model.config_transfer(args)
+
+        model._fix_weight(just_fc = True)
+    else:
+        if main_process():
+            logger.info("=> no checkpoint found at '{}'".format(args.model_path))
+        model._fix_weight()
+
+    logger.info(model)
+    
     param_grad, param_all, param_prompt, param_basemodel_grad, param_basemodel_nograd = count_prompt_parameters(model)
     if main_process():
         logger.info("Trainable Parameters: {}".format(param_grad))
@@ -202,6 +237,28 @@ def main_worker(gpu, ngpus_per_node, argss):
             val_loader = torch.utils.data.DataLoader(val_data, batch_size=args.batch_size_val,
                                                      shuffle=False, num_workers=args.workers, pin_memory=True,
                                                      drop_last=False, sampler=val_sampler)
+    elif args.data_name == 'shapenetpart':
+        
+        from dataset.shapenetpart import shapenetpart
+        root = './data'
+        dataset_name = 'shapenetpart'
+        split = 'train'
+        
+        train_data = shapenetpart(root=root, dataset_name=dataset_name, num_points=2048, split=split)
+        train_sampler = torch.utils.data.distributed.DistributedSampler(train_data, shuffle=True) if args.distributed else None
+        train_loader = torch.utils.data.DataLoader(train_data, batch_size=args.batch_size,
+                                                   shuffle=(train_sampler is None),
+                                                   num_workers=args.workers, pin_memory=True, sampler=train_sampler,
+                                                   drop_last=True, worker_init_fn=worker_init_fn)
+        if args.evaluate:
+            split = 'test'
+            val_data = shapenetpart(root=root, dataset_name=dataset_name, num_points=2048, split=split)
+            val_sampler = None
+            val_loader = torch.utils.data.DataLoader(val_data, batch_size=args.batch_size_val,
+                                                     shuffle=False, num_workers=args.workers, pin_memory=True,
+                                                     drop_last=False, sampler=val_sampler)
+   
+            
     elif args.data_name == 'scanobjectnn' or args.data_name == 'scanobjectnn_hardest':
         from dataset.scanobjectnn import ScanObjectNN
         train_data = ScanObjectNN(config=args, subset='train')
@@ -216,6 +273,22 @@ def main_worker(gpu, ngpus_per_node, argss):
             val_loader = torch.utils.data.DataLoader(val_data, batch_size=args.batch_size_val,
                                                      shuffle=False, num_workers=args.workers, pin_memory=True,
                                                      drop_last=False, sampler=val_sampler)
+                                                
+    elif args.data_name == 'shapenetcore':
+        from dataset.shapenetcore import ShapeNetCore
+        train_data = ShapeNetCore(config=args, split='train')
+        train_sampler = torch.utils.data.distributed.DistributedSampler(train_data, shuffle=True) if args.distributed else None
+        train_loader = torch.utils.data.DataLoader(train_data, batch_size=args.batch_size,
+                                                   shuffle=(train_sampler is None),
+                                                   num_workers=args.workers, pin_memory=True, sampler=train_sampler,
+                                                   drop_last=True, worker_init_fn=worker_init_fn)
+        if args.evaluate:
+            val_data = ShapeNetCore(config=args, split='test')
+            val_sampler = None
+            val_loader = torch.utils.data.DataLoader(val_data, batch_size=args.batch_size_val,
+                                                     shuffle=False, num_workers=args.workers, pin_memory=True,
+                                                     drop_last=False, sampler=val_sampler)
+    
     else:
         raise Exception('Dataset not supported yet'.format(args.data_name))
 
@@ -223,27 +296,27 @@ def main_worker(gpu, ngpus_per_node, argss):
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             train_sampler.set_epoch(epoch)
-        if args.data_name == 'modelnet' or args.data_name == 'scanobjectnn' or args.data_name == 'scanobjectnn_hardest':
+        if args.data_name == 'modelnet' or args.data_name == 'scanobjectnn' or args.data_name == 'scanobjectnn_hardest' or args.data_name == 'shapenetpart' or args.data_name == 'shapenetcore' :
             loss_train_cls, acc_train_cls, current_iter \
                 = train_cls(train_loader, model, optimizer, scheduler, epoch)
         else:
             raise Exception('Dataset not supported yet'.format(args.data_name))
         epoch_log = epoch + 1
         if main_process():
-            if args.data_name == 'modelnet' or args.data_name == 'scanobjectnn' or args.data_name == 'scanobjectnn_hardest':
+            if args.data_name == 'modelnet' or args.data_name == 'scanobjectnn' or args.data_name == 'scanobjectnn_hardest' or args.data_name == 'shapenetpart' or args.data_name == 'shapenetcore' :
                 writer.add_scalar('loss_train_cls', loss_train_cls, epoch_log)
                 writer.add_scalar('acc_train_cls', acc_train_cls, epoch_log)
 
         is_best = False
         if args.evaluate and (epoch_log % args.eval_freq == 0):
-            if args.data_name == 'modelnet' or args.data_name == 'scanobjectnn' or args.data_name == 'scanobjectnn_hardest':
+            if args.data_name == 'modelnet' or args.data_name == 'scanobjectnn' or args.data_name == 'scanobjectnn_hardest' or args.data_name == 'shapenetpart' or args.data_name == 'shapenetcore' :
                 loss_val_cls, acc_val_cls \
                     = validate_cls(val_loader, model)
             else:
                 raise Exception('Dataset not supported yet'.format(args.data_name))
 
             if main_process():
-                if args.data_name == 'modelnet' or args.data_name == 'scanobjectnn' or args.data_name == 'scanobjectnn_hardest':
+                if args.data_name == 'modelnet' or args.data_name == 'scanobjectnn' or args.data_name == 'scanobjectnn_hardest' or args.data_name == 'shapenetpart' or args.data_name == 'shapenetcore' :
                     writer.add_scalar('loss_val_cls', loss_val_cls, epoch_log)
                     writer.add_scalar('acc_val_cls', acc_val_cls, epoch_log)
 
@@ -265,13 +338,19 @@ def main_worker(gpu, ngpus_per_node, argss):
         # torch.cuda.empty_cache()
     if main_process():
         writer.close()
-        if args.data_name == 'modelnet' or args.data_name == 'scanobjectnn' or args.data_name == 'scanobjectnn_hardest':
+        if args.data_name == 'modelnet' or args.data_name == 'scanobjectnn' or args.data_name == 'scanobjectnn_hardest' or args.data_name == 'shapenetpart' or args.data_name == 'shapenetcore' :
             logger.info('==>Training done!\nBest Accuracy: %.3f' % (best_acc_cls))
         else:
             raise Exception('Dataset not supported yet'.format(args.data_name))
 
 
 def train_cls(train_loader, model, optimizer, scheduler, epoch):
+    global comu_Iter_acc 
+    global comu_Iter_loss     
+    global comu_epoch_acc 
+    global comu_epoch_loss
+   
+
     torch.backends.cudnn.enabled = True
     batch_time = AverageMeter()
     data_time = AverageMeter()
@@ -342,6 +421,8 @@ def train_cls(train_loader, model, optimizer, scheduler, epoch):
         t_m, t_s = divmod(remain_time, 60)
         t_h, t_m = divmod(t_m, 60)
         remain_time = '{:02d}:{:02d}:{:02d}'.format(int(t_h), int(t_m), int(t_s))
+        comu_Iter_acc.append(accuracy.item())
+        comu_Iter_loss.append(loss_meter.val)
 
         if (i + 1) % args.print_freq == 0 and main_process():
             logger.info('Epoch: [{}/{}][{}/{}] '
@@ -368,6 +449,35 @@ def train_cls(train_loader, model, optimizer, scheduler, epoch):
     if main_process():
         logger.info(
             'Train result at epoch [{}/{}]: avgAcc {:.4f}.'.format(epoch + 1, args.epochs, avg_acc))
+        
+    
+    comu_epoch_acc.append(avg_acc)
+    comu_epoch_loss.append(loss_meter.avg)
+        
+    with open(args.save_path+'/comu_Iter_acc.txt', 'a') as f:
+        for item in comu_Iter_acc:
+            f.write(str(item) + "\n")
+        
+    with open(args.save_path+'/comu_Iter_loss.txt', 'a') as f:
+        for item in comu_Iter_loss:
+            f.write(str(item) + "\n")
+          
+            
+    
+        
+    with open(args.save_path+'/comu_epoch_acc.txt', 'a') as f:
+        for item in comu_epoch_acc:
+            f.write(str(item) + "\n")
+       
+    with open(args.save_path+'/comu_epoch_loss.txt', 'a') as f:
+        for item in comu_epoch_loss:
+            f.write(str(item) + "\n")
+            
+    comu_Iter_acc = []
+    comu_Iter_loss  = []
+    comu_epoch_acc = []
+    comu_epoch_loss = []
+    
     return loss_meter.avg, avg_acc, current_iter
 
 
@@ -376,6 +486,9 @@ def validate_cls(val_loader, model):
     loss_meter = AverageMeter()
     labels = []
     preds = []
+    
+    global avgAcc_validate
+    global avgLoss_validate
 
     theta = np.linspace(0.1, 2, 9)
     phi = -0.35
@@ -412,6 +525,21 @@ def validate_cls(val_loader, model):
     if main_process():
         logger.info(
             'Val result: avgAcc {:.4f}.'.format(avg_acc))
+    
+    
+    avgAcc_validate.append(avg_acc)
+    avgLoss_validate.append(loss_meter.avg)
+    
+    with open(args.save_path+'/avgAcc_validate.txt', 'a') as f:
+        for item in avgAcc_validate:
+            f.write(str(item) + "\n")
+    with open(args.save_path+'/avgLoss_validate.txt', 'a') as f:
+        for item in avgLoss_validate:
+            f.write(str(item) + "\n")
+    
+    avgAcc_validate = []
+    avgLoss_validate = []
+    
     return loss_meter.avg, avg_acc
 
 

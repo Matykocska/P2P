@@ -4,6 +4,7 @@ import torch.nn.functional as F
 
 from timm.models import create_model
 from models.layers.encoder import ProjEnc
+import numpy as np
 
 
 class P2P(nn.Module):
@@ -11,6 +12,7 @@ class P2P(nn.Module):
         super().__init__()
         self.cfg = cfg
         self.enc = ProjEnc(cfg)
+        #self.img_num = 0
 
         if is_test:
             self.base_model = create_model(cfg.base_model_variant)
@@ -23,11 +25,16 @@ class P2P(nn.Module):
         if 'resnet' in cfg.base_model_variant:
             self.base_model.num_features = self.base_model.fc.in_features
         
+        if cfg.transfer_classes and not is_test:
+            classes = cfg.transfer_classes
+        else:
+            classes = cfg.classes
+
         if cfg.head_type == 'mlp':
             from models.layers.head import MLPHead
-            cls_head = MLPHead(self.base_model.num_features, cfg.classes, cfg.mlp_mid_channels, cfg.mlp_dropout_ratio)
+            cls_head = MLPHead(self.base_model.num_features, classes, cfg.mlp_mid_channels, cfg.mlp_dropout_ratio)
         elif cfg.head_type == 'linear':
-            cls_head = nn.Linear(self.base_model.num_features, cfg.classes)
+            cls_head = nn.Linear(self.base_model.num_features, classes)
         else:
             raise ValueError('cfg.head_type is not defined!')
         
@@ -40,12 +47,12 @@ class P2P(nn.Module):
 
         self.loss_ce = nn.CrossEntropyLoss()
 
-    def _fix_weight(self):
+    def _fix_weight(self, just_fc=False):
         for param in self.base_model.parameters():
             param.requires_grad = False
 
         # learnable cls token
-        if 'vit' in self.cfg.base_model_variant:
+        if 'vit' in self.cfg.base_model_variant and (not just_fc):
             self.base_model.cls_token.requires_grad = True
 
         # learnable cls head parameters
@@ -65,6 +72,26 @@ class P2P(nn.Module):
                 if self.cfg.update_type in name:
                     param.requires_grad = True
             print('Learnable {} parameters!'.format(self.cfg.update_type))
+
+        if just_fc:
+            for name, param in self.enc.named_parameters():
+                param.requires_grad = False
+
+    def config_transfer(self, cfg):
+        if cfg.head_type == 'mlp':
+            from models.layers.head import MLPHead
+            cls_head = MLPHead(self.base_model.num_features, cfg.classes, cfg.mlp_mid_channels, cfg.mlp_dropout_ratio)
+        elif cfg.head_type == 'linear':
+            cls_head = nn.Linear(self.base_model.num_features, cfg.classes)
+        else:
+            raise ValueError('cfg.head_type is not defined!')
+        
+        if 'convnext' in cfg.base_model_variant:
+            self.base_model.head.fc = cls_head
+        elif 'resnet' in cfg.base_model_variant:
+            self.base_model.fc = cls_head
+        else:
+            self.base_model.head = cls_head
 
     def get_loss_acc(self, pred, gt, smoothing=True):
         gt = gt.contiguous().view(-1).long()
@@ -88,5 +115,7 @@ class P2P(nn.Module):
 
     def forward(self, pc, original_pc):
         img = self.enc(original_pc, pc)
+        #np.save('imgs/img_{}.npy'.format(self.img_num), img.detach().cpu().numpy())
+        #self.img_num += 1
         out = self.base_model(img)
         return out

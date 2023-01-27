@@ -48,7 +48,7 @@ def worker_init_fn(worker_id):
 
 def get_parser():
     parser = argparse.ArgumentParser(description='BPNet')
-    parser.add_argument('--config', type=str, default='config/scannet/promptvit_scannet3d_5cm.yaml', help='config file')
+    parser.add_argument('--config', type=str, default='config/scannet/promptvit_scannet3d_5cm.yaml', help='config files')
     parser.add_argument('opts', help='see config/scannet/promptvit_scannet3d_5cm.yaml for all options', default=None,
                         nargs=argparse.REMAINDER)
     args = parser.parse_args()
@@ -78,8 +78,7 @@ def main_process():
 def main():
     args = get_parser()
     os.environ["CUDA_VISIBLE_DEVICES"] = ','.join(str(x) for x in args.train_gpu)
-    #os.environ["CUDA_LAUNCH_BLOCKING"] = '1'
-    cudnn.benchmark = False
+    cudnn.benchmark = True
 
     if args.manual_seed is not None:
         random.seed(args.manual_seed)
